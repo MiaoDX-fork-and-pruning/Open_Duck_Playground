@@ -1,0 +1,180 @@
+"""Newton-accelerated standing task for Open Duck Mini V2."""
+
+from typing import Any, Dict, Optional, Union
+
+import jax
+import jax.numpy as jp
+from ml_collections import config_dict
+from mujoco import mjx
+
+from mujoco_playground._src import mjx_env
+from . import standing
+from .newton_base import NewtonOpenDuckMiniV2Env
+
+
+class NewtonStandingEnv(standing.Standing, NewtonOpenDuckMiniV2Env):
+    """Newton-accelerated standing environment.
+    
+    This class inherits from both StandingEnv and NewtonOpenDuckMiniV2Env
+    to get the standing task logic with Newton physics acceleration.
+    """
+    
+    def __init__(
+        self,
+        xml_path: str,
+        config: config_dict.ConfigDict,
+        config_overrides: Optional[Dict[str, Union[str, int, list[Any]]]] = None,
+        use_newton: bool = True,
+    ) -> None:
+        """Initialize Newton standing environment."""
+        # Initialize with Newton backend
+        NewtonOpenDuckMiniV2Env.__init__(
+            self, 
+            xml_path, 
+            config, 
+            config_overrides,
+            use_newton=use_newton
+        )
+        
+        # Initialize standing-specific components
+        standing.Standing._setup_reward_and_termination_fn(self)
+        
+    def step(self, state: mjx_env.State, action: jax.Array) -> mjx_env.State:
+        """Step the environment with Newton physics.
+        
+        This overrides the step method to use Newton for physics
+        while preserving all the standing task logic.
+        """
+        # Handle delayed actions
+        action_w_delay = state.info["delayed_action"].at[:-1].set(
+            state.info["delayed_action"][1:]
+        )
+        action_w_delay = action_w_delay.at[-1].set(action)
+        state.info["delayed_action"] = action_w_delay
+        
+        # Handle push perturbations
+        push_frame_offset = jp.where(
+            state.info["push_step"] == 0,
+            self._push_start_time,
+            state.info["push_step"],
+        )
+        push = jp.where(
+            state.info["push_step"] - push_frame_offset < self._push_duration,
+            1.0,
+            0.0,
+        )
+        push_theta = (
+            jax.random.uniform(state.info["rng"], minval=0, maxval=2 * jp.pi)
+            * (push * (state.info["push_step"] == self._push_start_time))
+            + state.info["push_theta"]
+        )
+        state.info["push_theta"] = push_theta
+        push = push * jp.array([jp.cos(push_theta), jp.sin(push_theta)])
+        
+        push_magnitude = (
+            jax.random.uniform(state.info["rng"], minval=7, maxval=12)
+            * (state.info["push_step"] == self._push_start_time)
+            + state.info["push_magnitude"]
+        )
+        state.info["push_magnitude"] = push_magnitude
+        
+        # Apply push to velocity
+        qvel = state.data.qvel
+        qvel = qvel.at[
+            self._floating_base_qvel_addr : self._floating_base_qvel_addr + 2
+        ].set(
+            push * push_magnitude
+            + qvel[self._floating_base_qvel_addr : self._floating_base_qvel_addr + 2]
+        )
+        data = state.data.replace(qvel=qvel)
+        state = state.replace(data=data)
+        
+        # Calculate motor targets
+        motor_targets = (
+            self._default_actuator + action_w_delay * self._config.action_scale
+        )
+        
+        # Use Newton physics step if available, otherwise fall back to MJX
+        if self.use_newton and self._newton_step_jax is not None:
+            # Convert to Newton state
+            import newton_utils
+            state_dict = newton_utils.mjx_to_newton_state(data)
+            
+            # Step with Newton
+            next_state_dict = self._newton_step_jax(state_dict, motor_targets)
+            
+            # Convert back to MJX
+            data = newton_utils.newton_to_mjx_data(
+                next_state_dict,
+                self._mjx_model,
+                data
+            )
+        else:
+            # Use MJX step
+            from mujoco_playground._src import mjx_env
+            data = mjx_env.step(self.mjx_model, data, motor_targets, self.n_substeps)
+            
+        state.info["motor_targets"] = motor_targets
+        
+        # Contact detection
+        from .standing import geoms_colliding
+        contact = jp.array(
+            [
+                geoms_colliding(data, geom_id, self._floor_geom_id)
+                for geom_id in self._feet_geom_id
+            ]
+        )
+        contact_filt = contact | state.info["last_contact"]
+        first_contact = (state.info["feet_air_time"] > 0.0) * contact_filt
+        state.info["feet_air_time"] += self.dt
+        p_f = data.site_xpos[self._feet_site_id]
+        p_fz = p_f[..., -1]
+        state.info["swing_peak"] = jp.maximum(state.info["swing_peak"], p_fz)
+        
+        # Get observation, termination, and rewards
+        obs = self._get_obs(data, state.info, contact)
+        done = self._get_termination(data)
+        
+        rewards = self._get_reward(
+            data, action, state.info, state.metrics, done, first_contact, contact
+        )
+        rewards = {
+            k: v * self._config.reward_config.scales[k] for k, v in rewards.items()
+        }
+        reward = jp.clip(sum(rewards.values()) * self.dt, 0.0, 10000.0)
+        
+        # Update state info
+        state.info["push"] = push
+        state.info["step"] += 1
+        state.info["push_step"] += 1
+        state.info["last_last_last_act"] = state.info["last_last_act"]
+        state.info["last_last_act"] = state.info["last_act"]
+        state.info["last_act"] = action
+        state.info["rng"], cmd_rng = jax.random.split(state.info["rng"])
+        state.info["command"] = jp.where(
+            state.info["step"] > 500,
+            self.sample_command(cmd_rng),
+            state.info["command"],
+        )
+        state.info["step"] = jp.where(
+            done | (state.info["step"] > 500),
+            0,
+            state.info["step"],
+        )
+        state.info["feet_air_time"] *= ~contact
+        state.info["last_contact"] = contact
+        state.info["swing_peak"] *= ~contact
+        
+        # Update metrics
+        for k, v in rewards.items():
+            rew_scale = self._config.reward_config.scales[k]
+            if rew_scale != 0:
+                if rew_scale > 0:
+                    state.metrics[f"reward/{k}"] = v
+                else:
+                    state.metrics[f"cost/{k}"] = -v
+        state.metrics["swing_peak"] = jp.mean(state.info["swing_peak"])
+        
+        done = done.astype(reward.dtype)
+        state = state.replace(data=data, obs=obs, reward=reward, done=done)
+        return state

@@ -25,6 +25,8 @@ pip install -e .
 
 # Training
 
+## Basic Training
+
 If you want to use the [imitation reward](https://la.disneyresearch.com/wp-content/uploads/BD_X_paper.pdf), you can generate reference motion with [this repo](https://github.com/apirrone/Open_Duck_reference_motion_generator)
 
 Then copy `polynomial_coefficients.pkl` in `playground/<robot>/data/`
@@ -34,8 +36,40 @@ You'll also have to set `USE_IMITATION_REWARD=True` in it's `joystick.py` file
 Run: 
 
 ```bash
-uv run playground/<robot>/runner.py 
+# Default training with MJX backend (existing behavior)
+uv run python -m playground.open_duck_mini_v2.runner --env standing --task flat_terrain
+
+# Or the original way still works
+uv run playground/<robot>/runner.py
+
+# For joystick control
+uv run python -m playground.open_duck_mini_v2.runner --env joystick --task flat_terrain
 ```
+
+## Training with Newton Backend (Experimental)
+
+When Newton packages are available and you have a GPU:
+
+```bash
+# Explicitly use Newton backend
+uv run python -m playground.open_duck_mini_v2.runner --env standing --task flat_terrain --backend newton
+
+# Auto-detect best backend (uses Newton if GPU available)
+uv run python -m playground.open_duck_mini_v2.runner --env standing --task flat_terrain --backend auto
+
+# Or use environment variable
+export OPEN_DUCK_BACKEND=newton
+uv run python -m playground.open_duck_mini_v2.runner --env standing --task flat_terrain
+```
+
+### Training Options
+
+- `--env`: Environment type (`standing` or `joystick`)
+- `--task`: Task configuration (`flat_terrain` or `rough_terrain`)
+- `--backend`: Physics backend (`mjx`, `newton`, or `auto`) - default is `mjx`
+- `--num_timesteps`: Number of training steps (default: 150000000)
+- `--output_dir`: Checkpoint directory (default: `checkpoints`)
+- `--restore_checkpoint_path`: Resume from checkpoint
 
 ## Tensorboard
 

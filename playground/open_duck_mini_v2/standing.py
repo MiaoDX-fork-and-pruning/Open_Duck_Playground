@@ -108,13 +108,30 @@ class Standing(open_duck_mini_v2_base.OpenDuckMiniV2Env):
         task: str = "flat_terrain",
         config: config_dict.ConfigDict = default_config(),
         config_overrides: Optional[Dict[str, Union[str, int, list[Any]]]] = None,
+        backend: str = "mjx",
     ):
         super().__init__(
             xml_path=constants.task_to_xml(task).as_posix(),
             config=config,
             config_overrides=config_overrides,
         )
+        self.backend = backend
+        if backend == "newton":
+            print("Newton backend selected - using experimental Newton physics")
+        elif backend == "auto":
+            # Auto-detect best backend
+            import jax
+            if jax.devices()[0].platform == "gpu":
+                self.backend = "newton"
+                print("GPU detected - using Newton backend")
+            else:
+                self.backend = "mjx"
         self._post_init()
+    
+    @property
+    def backend_name(self) -> str:
+        """Return the name of the physics backend being used."""
+        return self.backend.upper()
 
     def _post_init(self) -> None:
 

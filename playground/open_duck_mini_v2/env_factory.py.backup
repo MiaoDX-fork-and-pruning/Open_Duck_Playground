@@ -1,0 +1,70 @@
+"""Environment factory with Newton backend support."""
+
+from typing import Dict, Any, Optional, Union
+from ml_collections import config_dict
+import os
+
+from . import standing
+from . import joystick
+
+
+def create_standing_env(
+    xml_path: str,
+    config: config_dict.ConfigDict,
+    config_overrides: Optional[Dict[str, Union[str, int, list[Any]]]] = None,
+    backend: str = "auto"
+) -> standing.Standing:
+    """Create standing environment with specified backend.
+    
+    Args:
+        xml_path: Path to MuJoCo XML model
+        config: Environment configuration
+        config_overrides: Optional config overrides
+        backend: Physics backend - "mjx", "newton", or "auto"
+                "auto" will use Newton if available and GPU is present
+                
+    Returns:
+        Standing environment instance
+    """
+    # For now, just return the standard Standing environment
+    # Newton integration can be added later when the packages are available
+    if backend != "mjx" and backend != "auto":
+        print(f"Warning: {backend} backend not yet implemented, using MJX")
+    
+    return standing.Standing(
+        xml_path=xml_path,
+        config=config,
+        config_overrides=config_overrides
+    )
+
+
+def create_joystick_env(
+    xml_path: str,
+    config: config_dict.ConfigDict,
+    config_overrides: Optional[Dict[str, Union[str, int, list[Any]]]] = None,
+    backend: str = "auto"
+) -> joystick.JoystickEnv:
+    """Create joystick environment with specified backend.
+    
+    Args:
+        xml_path: Path to MuJoCo XML model
+        config: Environment configuration  
+        config_overrides: Optional config overrides
+        backend: Physics backend - "mjx", "newton", or "auto"
+                
+    Returns:
+        Joystick environment instance
+    """
+    # For now, joystick only supports MJX
+    # Newton joystick can be added later
+    return joystick.JoystickEnv(
+        xml_path=xml_path,
+        config=config,
+        config_overrides=config_overrides
+    )
+
+
+# Environment backend can also be controlled via environment variable
+def get_backend_from_env() -> str:
+    """Get backend preference from environment variable."""
+    return os.environ.get("OPEN_DUCK_BACKEND", "auto")
